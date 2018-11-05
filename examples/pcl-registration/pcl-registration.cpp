@@ -68,20 +68,7 @@
 #include <mutex>                    // std::mutex, std::lock_guard
 #include <cmath>                    // std::ceil
 
-
-/* Crmming in the multicam setup to see if it flies */
-
-// Struct for managing rotation of pointcloud view
-struct state {
-    state() : yaw(0.0), pitch(0.0), last_x(0.0), last_y(0.0),
-              ml(false), offset_x(0.0f), offset_y(0.0f) {}
-    double yaw, pitch, last_x, last_y; bool ml; float offset_x, offset_y;
-};
-
 using pcl_ptr = pcl::PointCloud<pcl::PointXYZ>::Ptr;
-
-void register_glfw_callbacks(window& app, state& app_state);
-void draw_pointcloud(window& app, state& app_state, const std::vector<pcl_ptr>& points);
 
 pcl_ptr points_to_pcl(const rs2::points& points)
 {
@@ -103,10 +90,6 @@ pcl_ptr points_to_pcl(const rs2::points& points)
 
     return cloud;
 }
-
-//  float3 colors[] { { 0.8f, 0.1f, 0.3f },
-//                 { 0.1f, 0.9f, 0.5f },
-//  };
 
 
 const std::string no_camera_message = "No camera connected, please connect 1 or more";
@@ -145,11 +128,6 @@ public:
 
 
 
-
-
-// Helper functions
-
-
 class device_container
 {
     // Helper struct per pipeline
@@ -166,115 +144,6 @@ class device_container
 
 public:
 
-
-    void pairAlign (const PointCloud::Ptr cloud_src, const PointCloud::Ptr cloud_tgt, PointCloud::Ptr output, Eigen::Matrix4f &final_transform, bool downsample = false)
-    {
-        //
-        // Downsample for consistency and speed
-        // \note enable this for large datasets
-        PointCloud::Ptr src (new PointCloud);
-        PointCloud::Ptr tgt (new PointCloud);
-        pcl::VoxelGrid<PointT> grid;
-        if (downsample)
-        {
-            grid.setLeafSize (10.1, 10.1, 10.1);
-            grid.setInputCloud (cloud_src);
-            grid.filter (*src);
-
-            grid.setInputCloud (cloud_tgt);
-            grid.filter (*tgt);
-        }
-        else
-        {
-            src = cloud_src;
-            tgt = cloud_tgt;
-        }
-
-
-        // Compute surface normals and curvature
-        PointCloudWithNormals::Ptr points_with_normals_src (new PointCloudWithNormals);
-        PointCloudWithNormals::Ptr points_with_normals_tgt (new PointCloudWithNormals);
-
-        pcl::NormalEstimation<PointT, PointNormalT> norm_est;
-        pcl::search::KdTree<pcl::PointXYZ>::Ptr tree (new pcl::search::KdTree<pcl::PointXYZ> ());
-        norm_est.setSearchMethod (tree);
-        norm_est.setKSearch (30);
-
-        norm_est.setInputCloud (src);
-        norm_est.compute (*points_with_normals_src);
-        pcl::copyPointCloud (*src, *points_with_normals_src);
-
-        norm_est.setInputCloud (tgt);
-        norm_est.compute (*points_with_normals_tgt);
-        pcl::copyPointCloud (*tgt, *points_with_normals_tgt);
-
-        //
-        // Instantiate our custom point representation (defined above) ...
-        MyPointRepresentation point_representation;
-        // ... and weight the 'curvature' dimension so that it is balanced against x, y, and z
-        float alpha[4] = {1.0, 1.0, 1.0, 1.0};
-        point_representation.setRescaleValues (alpha);
-
-        //
-        // Align
-        pcl::IterativeClosestPointNonLinear<PointNormalT, PointNormalT> reg;
-        reg.setTransformationEpsilon (1e-6);
-        // Set the maximum distance between two correspondences (src<->tgt) to 10cm
-        // Note: adjust this based on the size of your datasets
-        reg.setMaxCorrespondenceDistance (0.1);
-        // Set the point representation
-        reg.setPointRepresentation (boost::make_shared<const MyPointRepresentation> (point_representation));
-
-        reg.setInputSource (points_with_normals_src);
-        reg.setInputTarget (points_with_normals_tgt);
-
-
-
-        //
-        // Run the same optimization in a loop and visualize the results
-        Eigen::Matrix4f Ti = Eigen::Matrix4f::Identity (), prev, targetToSource;
-        PointCloudWithNormals::Ptr reg_result = points_with_normals_src;
-        reg.setMaximumIterations (20);
-        for (int i = 0; i < 256; ++i)
-        {
-            PCL_INFO ("Iteration Nr. %d.\n", i);
-
-            // save cloud for visualization purpose
-            points_with_normals_src = reg_result;
-
-            // Estimate
-            reg.setInputSource (points_with_normals_src);
-            reg.align (*reg_result);
-
-            //accumulate transformation between each Iteration
-            Ti = reg.getFinalTransformation () * Ti;
-
-            //if the difference between this transformation and the previous one
-            //is smaller than the threshold, refine the process by reducing
-            //the maximal correspondence distance
-            if (fabs ((reg.getLastIncrementalTransformation () - prev).sum ()) < reg.getTransformationEpsilon ())
-                reg.setMaxCorrespondenceDistance (reg.getMaxCorrespondenceDistance () - 0.001);
-
-            prev = reg.getLastIncrementalTransformation ();
-
-        }
-
-        PCL_INFO ("Made It Out.\n");
-        //
-        // Get the transformation from target to source
-        targetToSource = Ti.inverse();
-        PCL_INFO ("Can Invert.\n");
-        //
-        // Transform target back in source frame
-        pcl::transformPointCloud (*cloud_tgt, *output, targetToSource);
-        PCL_INFO ("Can transform.\n");
-
-        //add the source to the transformed target
-        *output += *cloud_src;
-
-        final_transform = targetToSource;
-
-    }
 
     void enable_device(rs2::device dev)
     {
@@ -362,7 +231,7 @@ public:
             }
         }
     }
-    std::vector<pcl_ptr> get_clouds(int cols, int rows, float view_width, float view_height, window app) {
+    std::vector<pcl_ptr> get_clouds(int cols, int rows, float view_width, float view_height, window app, bool downsample = true) {
         std::lock_guard<std::mutex> lock(_mutex);
         int stream_no = 0;
         int device_no = 0;
@@ -371,92 +240,169 @@ public:
             // For each device get its frames
             PCL_INFO ("Getting Clouds for Device %d\n", device_no);
             device_no++;
-            if (stream_no < 2) {
-                for (auto &&id_to_frame : view.second.frames_per_stream) {
-                    PCL_INFO ("Getting Stream number %d\n", stream_no);
+            for (auto &&id_to_frame : view.second.frames_per_stream) {
+                PCL_INFO ("Getting Stream number %d\n", stream_no);
 
+                // Wait for the next set of frames from the camera
+                glfw_state app_state;
+                auto frames = view.second.pipe.wait_for_frames();
 
+                auto depth = frames.get_depth_frame();
 
+                // Generate the pointcloud and texture mappings
+                view.second.points = view.second.pc.calculate(depth);
 
-                    // Wait for the next set of frames from the camera
+                auto color = frames.get_color_frame();
+                // For cameras that don't have RGB sensor, we'll map the pointcloud to infrared instead of color
+                if (!color)
+                    color = frames.get_infrared_frame();
 
-                    glfw_state app_state;
-                    auto frames = view.second.pipe.wait_for_frames();
+                // Tell pointcloud object to map to this color frame
+                view.second.pc.map_to(color);
 
-                    auto depth = frames.get_depth_frame();
+                // Upload the color frame to OpenGL
+                app_state.tex.upload(color);
 
-                    // Generate the pointcloud and texture mappings
-                    view.second.points = view.second.pc.calculate(depth);
-
-                    auto color = frames.get_color_frame();
-
-                    // For cameras that don't have RGB sensor, we'll map the pointcloud to infrared instead of color
-                    if (!color)
-                        color = frames.get_infrared_frame();
-
-                    // Tell pointcloud object to map to this color frame
-                    view.second.pc.map_to(color);
-
-                    // Upload the color frame to OpenGL
-                    app_state.tex.upload(color);
-
-
-                    layer_stack[stream_no] = view.second.points;
-                    PCL_INFO ("This Many Points %d\n", view.second.points.size());
-                    stream_no++;
-
-                    // draw_pointcloud(view_width, view_height, app_state, view.second.points);
-
-                    // Add visualization data
-                }
+                layer_stack[stream_no] = view.second.points;
+                PCL_INFO ("This Many Points %d\n", view.second.points.size());
+                stream_no++;
             }
+        }
 
+        glfw_state app_state;
+        draw_pointcloud(view_width, view_height, app_state, layer_stack[0]);
+
+        std::vector<pcl_ptr> layers;
+        PointCloud::Ptr result(new PointCloud), source, target;
+        Eigen::Matrix4f GlobalTransform = Eigen::Matrix4f::Identity(), pairTransform;
+
+        source = points_to_pcl(layer_stack[0]);
+        target = points_to_pcl(layer_stack[1]);
+
+        PointCloud::Ptr temp(new PointCloud);
+
+        // Downsample for consistency and speed
+        // \note enable this for large datasets
+        PointCloud::Ptr src(new PointCloud);
+        PointCloud::Ptr tgt(new PointCloud);
+        pcl::VoxelGrid<PointT> grid;
+        if (downsample) {
+            grid.setLeafSize(30.0, 30.0, 30.0);
+            grid.setInputCloud(source);
+            grid.filter(*src);
+
+            grid.setInputCloud(target);
+            grid.filter(*tgt);
+        } else {
+            src = source;
+            tgt = target;
         }
 
 
-            std::vector<pcl_ptr> layers;
-            PointCloud::Ptr result(new PointCloud), source, target;
-            Eigen::Matrix4f GlobalTransform = Eigen::Matrix4f::Identity(), pairTransform;
+        // Compute surface normals and curvature
+        PointCloudWithNormals::Ptr points_with_normals_src(new PointCloudWithNormals);
+        PointCloudWithNormals::Ptr points_with_normals_tgt(new PointCloudWithNormals);
 
-            source = points_to_pcl(layer_stack[0]);
-            target = points_to_pcl(layer_stack[1]);
+        pcl::NormalEstimation<PointT, PointNormalT> norm_est;
+        pcl::search::KdTree<pcl::PointXYZ>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZ>());
+        norm_est.setSearchMethod(tree);
+        norm_est.setKSearch(30);
 
-            //showCloudsLeft(source, target);
+        norm_est.setInputCloud(src);
+        norm_est.compute(*points_with_normals_src);
+        pcl::copyPointCloud(*src, *points_with_normals_src);
 
-            PointCloud::Ptr temp(new PointCloud);
-            //PCL_INFO ("Aligning %s (%d) with %s (%d).\n", source.f_name.c_str (), source->points.size (), data[i].f_name.c_str (), target->points.size ());
-            pairAlign(source, target, temp, pairTransform, true);
-            PCL_INFO ("Made It through the alignment");
-            //transform current pair into the global transform
-            pcl::transformPointCloud(*temp, *result, GlobalTransform);
+        norm_est.setInputCloud(tgt);
+        norm_est.compute(*points_with_normals_tgt);
+        pcl::copyPointCloud(*tgt, *points_with_normals_tgt);
 
-            //update the global transform
-            GlobalTransform = GlobalTransform * pairTransform;
+        //
+        // Instantiate our custom point representation (defined above) ...
+        MyPointRepresentation point_representation;
+        // ... and weight the 'curvature' dimension so that it is balanced against x, y, and z
+        float alpha[4] = {1.0, 1.0, 1.0, 1.0};
+        point_representation.setRescaleValues(alpha);
+
+        //
+        // Align
+        pcl::IterativeClosestPointNonLinear<PointNormalT, PointNormalT> reg;
+        reg.setTransformationEpsilon(1e-6);
+        // Set the maximum distance between two correspondences (src<->tgt) to 10cm
+        // Note: adjust this based on the size of your datasets
+        reg.setMaxCorrespondenceDistance(0.1);
+        // Set the point representation
+        reg.setPointRepresentation(boost::make_shared<const MyPointRepresentation>(point_representation));
+
+        reg.setInputSource(points_with_normals_src);
+        reg.setInputTarget(points_with_normals_tgt);
 
 
-            layers.push_back(result);
-            layers.push_back(result);
 
-            state app_state;
-            draw_pointcloud(app, app_state, layers);
+        //
+        // Run the same optimization in a loop and visualize the results
+        Eigen::Matrix4f Ti = Eigen::Matrix4f::Identity(), prev, targetToSource;
+        PointCloudWithNormals::Ptr reg_result = points_with_normals_src;
+        reg.setMaximumIterations(20);
+        for (int i = 0; i < 256; ++i) {
+            PCL_INFO ("Iteration Nr. %d.\n", i);
+
+            // save cloud for visualization purpose
+            points_with_normals_src = reg_result;
+
+            // Estimate
+            reg.setInputSource(points_with_normals_src);
+            reg.align(*reg_result);
+
+            //accumulate transformation between each Iteration
+            Ti = reg.getFinalTransformation() * Ti;
+
+            //if the difference between this transformation and the previous one
+            //is smaller than the threshold, refine the process by reducing
+            //the maximal correspondence distance
+            if (fabs((reg.getLastIncrementalTransformation() - prev).sum()) < reg.getTransformationEpsilon())
+                reg.setMaxCorrespondenceDistance(reg.getMaxCorrespondenceDistance() - 0.001);
+
+            prev = reg.getLastIncrementalTransformation();
+
+        }
+
+        PCL_INFO ("Made It Out.\n");
+        //
+        // Get the transformation from target to source
+        targetToSource = Ti.inverse();
+        PCL_INFO ("Can Invert.\n");
+        //
+        // Transform target back in source frame
+        pcl::transformPointCloud(*target, *temp, targetToSource);
+        PCL_INFO ("Can transform.\n");
+
+        //add the source to the transformed target
+        *temp += *source;
+
+        pairTransform = targetToSource;
+
+        PCL_INFO ("Made It through the alignment");
+        //transform current pair into the global transform
+        pcl::transformPointCloud(*temp, *result, GlobalTransform);
+
+        //update the global transform
+        GlobalTransform = GlobalTransform * pairTransform;
+
+
+        layers.push_back(result);
+        layers.push_back(result);
+
+
 
     }
         private:
         std::mutex _mutex;
         std::map<std::string, view_port> _devices;
-
-
-
 };
-
-
-
-
 
 int main(int argc, char * argv[]) try {
     // Create a simple OpenGL window for rendering:
     window app(1280, 1024, "CPP PCL Multi-Camera Autoregistration Example");
-    state app_state;
 
     device_container connected_devices;
 
@@ -494,13 +440,7 @@ int main(int argc, char * argv[]) try {
         float view_width = (app.width() / cols);
         float view_height = (app.height() / rows);
         PCL_INFO ("%d Devices Detexted.\n", connected_devices.device_count());
-        bool go = true;
-        if (go)
-            PCL_INFO ("Passed GO\n");
             connected_devices.get_clouds(cols, rows, view_width, view_height, app);
-            //draw_pointcloud(app, app_state, layers);
-            go = false;
-
     }
 
     return EXIT_SUCCESS;
@@ -518,101 +458,3 @@ catch (const std::exception & e)
 
 
 
-
-
-// Registers the state variable and callbacks to allow mouse control of the pointcloud
-void register_glfw_callbacks(window& app, state& app_state)
-{
-    app.on_left_mouse = [&](bool pressed)
-    {
-        app_state.ml = pressed;
-    };
-
-    app.on_mouse_scroll = [&](double xoffset, double yoffset)
-    {
-        app_state.offset_x += static_cast<float>(xoffset);
-        app_state.offset_y += static_cast<float>(yoffset);
-    };
-
-    app.on_mouse_move = [&](double x, double y)
-    {
-        if (app_state.ml)
-        {
-            app_state.yaw -= (x - app_state.last_x);
-            app_state.yaw = std::max(app_state.yaw, -120.0);
-            app_state.yaw = std::min(app_state.yaw, +120.0);
-            app_state.pitch += (y - app_state.last_y);
-            app_state.pitch = std::max(app_state.pitch, -80.0);
-            app_state.pitch = std::min(app_state.pitch, +80.0);
-        }
-        app_state.last_x = x;
-        app_state.last_y = y;
-    };
-
-    app.on_key_release = [&](int key)
-    {
-        if (key == 32) // Escape
-        {
-            app_state.yaw = app_state.pitch = 0; app_state.offset_x = app_state.offset_y = 0.0;
-        }
-    };
-}
-
-// Handles all the OpenGL calls needed to display the point cloud
-void draw_pointcloud(window& app, state& app_state, const std::vector<pcl_ptr>& points)
-{
-    // OpenGL commands that prep screen for the pointcloud
-    glPopMatrix();
-    glPushAttrib(GL_ALL_ATTRIB_BITS);
-
-    float width = app.width(), height = app.height();
-
-    glClearColor(153.f / 255, 153.f / 255, 153.f / 255, 1);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-    glMatrixMode(GL_PROJECTION);
-    glPushMatrix();
-    gluPerspective(60, width / height, 0.01f, 10.0f);
-
-    glMatrixMode(GL_MODELVIEW);
-    glPushMatrix();
-    gluLookAt(0, 0, 0, 0, 0, 1, 0, -1, 0);
-
-    glTranslatef(0, 0, +0.5f + app_state.offset_y*0.05f);
-    glRotated(app_state.pitch, 1, 0, 0);
-    glRotated(app_state.yaw, 0, 1, 0);
-    glTranslatef(0, 0, -0.5f);
-
-    glPointSize(width / 640);
-    glEnable(GL_TEXTURE_2D);
-
-    int color = 0;
-
-    for (auto&& pc : points)
-    {
-        //auto c = colors[(color++) % (sizeof(colors) / sizeof(float3))];
-
-        glBegin(GL_POINTS);
-//        glColor3f(c.x, c.y, c.z);
-
-        /* this segment actually prints the pointcloud */
-        for (int i = 0; i < pc->points.size(); i++)
-        {
-            auto&& p = pc->points[i];
-            if (p.z)
-            {
-                // upload the point and texture coordinates only for points we have depth data for
-                glVertex3f(p.x, p.y, p.z);
-            }
-        }
-
-        glEnd();
-    }
-
-    // OpenGL cleanup
-    glPopMatrix();
-    glMatrixMode(GL_PROJECTION);
-    glPopMatrix();
-    glPopAttrib();
-    glPushMatrix();
-}
