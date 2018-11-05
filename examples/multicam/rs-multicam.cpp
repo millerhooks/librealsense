@@ -10,6 +10,8 @@
 #include <mutex>                    // std::mutex, std::lock_guard
 #include <cmath>                    // std::ceil
 
+
+
 const std::string no_camera_message = "No camera connected, please connect 1 or more";
 const std::string platform_camera_name = "Platform Camera";
 
@@ -23,6 +25,8 @@ class device_container
         texture tex;
         rs2::pipeline pipe;
         rs2::pipeline_profile profile;
+        rs2::pointcloud pc;
+        rs2::points points;
     };
 
 public:
@@ -122,6 +126,8 @@ public:
             // For each device get its frames
             for (auto&& id_to_frame : view.second.frames_per_stream)
             {
+
+                /*
                 // If the frame is available
                 if (id_to_frame.second)
                 {
@@ -135,6 +141,35 @@ public:
                     view.second.tex.show(adjuested);
                     stream_no++;
                 }
+                 */
+
+                 // Wait for the next set of frames from the camera
+
+        glfw_state app_state;
+        auto frames = view.second.pipe.wait_for_frames();
+
+        auto depth = frames.get_depth_frame();
+
+        // Generate the pointcloud and texture mappings
+        view.second.points = view.second.pc.calculate(depth);
+
+        auto color = frames.get_color_frame();
+
+        // For cameras that don't have RGB sensor, we'll map the pointcloud to infrared instead of color
+        if (!color)
+            color = frames.get_infrared_frame();
+
+        // Tell pointcloud object to map to this color frame
+        view.second.pc.map_to(color);
+
+        // Upload the color frame to OpenGL
+        app_state.tex.upload(color);
+
+        // Draw the pointcloud
+        draw_pointcloud(view_width, view_height, app_state, view.second.points);
+
+
+
             }
         }
     }
@@ -148,6 +183,7 @@ int main(int argc, char * argv[]) try
 {
     // Create a simple OpenGL window for rendering:
     window app(1280, 960, "CPP Multi-Camera Example");
+
 
     device_container connected_devices;
 

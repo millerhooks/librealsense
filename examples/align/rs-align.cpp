@@ -27,6 +27,7 @@ int main(int argc, char * argv[]) try
     texture renderer;                     // Helper for renderig images
 
     // Create a pipeline to easily configure and start the camera
+    rs2::pointcloud pc;
     rs2::pipeline pipe;
     //Calling pipeline's start() without any additional parameters will start the first device
     // with its default streams.

@@ -1,6 +1,6 @@
 bin/
 lib/
-
+.idea
 ubuntu-xenial/
 ubuntu-xenial-hwe/
 
